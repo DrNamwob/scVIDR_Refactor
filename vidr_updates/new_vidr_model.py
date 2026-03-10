@@ -11,7 +11,7 @@ from scvi.module.base import BaseModuleClass, LossOutput, auto_move_data
 from scvi import REGISTRY_KEYS
 
 # Helper encoders/decoders
-from modules import VIDREncoder, VIDRDecoder
+from new_modules import VIDREncoder, VIDRDecoder
 
 # Device
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

@@ -26,7 +26,7 @@ from sklearn.linear_model import LinearRegression
 from new_utils import random_sample
 
 # Local imports
-from vidr_model import VIDRModule
+from new_vidr_model import VIDRModule
 
 logger = logging.getLogger(__name__)
 
@@ -277,6 +277,7 @@ class VIDR(BaseModelClass):
         np.ndarray of shape (n_cells, n_latent)
         """
         self.module.eval()
+        adata = self._validate_anndata(adata)
         dl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
 
         latent = []
@@ -394,6 +395,9 @@ class VIDR(BaseModelClass):
                         (latent_adata.obs[cell_type_key] == cell)
                         & (latent_adata.obs[treatment_key] == treat_key)
                     ]
+                    # Skip cell types absent in either condition — they produce NaN centroids
+                    if lc.n_obs == 0 or lt.n_obs == 0:
+                        continue
                     ctrl_centroid = np.average(lc.X, axis=0)
                     deltas.append(np.average(lt.X, axis=0) - ctrl_centroid)
                     latent_centroids.append(ctrl_centroid)

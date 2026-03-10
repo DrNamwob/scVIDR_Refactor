@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 
 import scanpy as sc
 
-from vidr import VIDR
+from new_vidr import VIDR
 from new_utils import normalize_data, prepare_data, prepare_cont_data
 
 # requirements

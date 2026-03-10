@@ -1,6 +1,7 @@
 data/
 model_full/
 predictions_full/
+liver_fibrosis_figures/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

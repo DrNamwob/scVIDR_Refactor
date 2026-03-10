@@ -23,9 +23,8 @@ import anndata
 import matplotlib.pyplot as plt
 import numpy as np
 import scanpy as sc
-from scipy import sparse
-
 from new_vidr import VIDR
+from scipy import sparse
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -79,26 +78,24 @@ adata.obs["cell_type"] = np.where(
 # ---------------------------------------------------------------------------
 CELLTYPE_REMAP = {
     # Macrophages
-    "Mac":   "Macrophages",
+    "Mac": "Macrophages",
     "Mac_1": "Macrophages",
     "Mac_2": "Macrophages",
     # HSCs
-    "HSC":   "HSCs",
+    "HSC": "HSCs",
     "HSC_1": "HSCs",
     "HSC_2": "HSCs",
     # Injured hepatocytes (disease-specific)
     "IJ_1_Hep": "Injured_Hepatocytes",
     "IJ_2_Hep": "Injured_Hepatocytes",
     # All other hepatocyte sub-types → healthy/zonation groups
-    "Hep_1":      "Healthy_Hepatocytes",
-    "Hep_2":      "Healthy_Hepatocytes",
-    "Hep_3":      "Healthy_Hepatocytes",
+    "Hep_1": "Healthy_Hepatocytes",
+    "Hep_2": "Healthy_Hepatocytes",
+    "Hep_3": "Healthy_Hepatocytes",
     "Central_Hep": "Healthy_Hepatocytes",
-    "Portal_Hep":  "Healthy_Hepatocytes",
+    "Portal_Hep": "Healthy_Hepatocytes",
 }
-adata.obs["cell_type"] = adata.obs["cell_type"].map(
-    lambda x: CELLTYPE_REMAP.get(x, x)
-)
+adata.obs["cell_type"] = adata.obs["cell_type"].map(lambda x: CELLTYPE_REMAP.get(x, x))
 logging.info(
     f"Unified cell_type breakdown (after remapping):\n{adata.obs['cell_type'].value_counts().to_string()}"
 )
@@ -137,8 +134,8 @@ if not shared_celltypes:
 # Injured_Hepatocytes only exist in Disease — they are the prediction target.
 # We hold them out of training, then ask: does applying the disease delta to
 # Healthy_Hepatocytes (Normal) reproduce what Injured_Hepatocytes actually look like?
-TEST_CELLTYPE = "Injured_Hepatocytes"   # held out from training (ground truth)
-CTRL_CELLTYPE = "Healthy_Hepatocytes"   # starting point for latent arithmetic
+TEST_CELLTYPE = "Injured_Hepatocytes"  # held out from training (ground truth)
+CTRL_CELLTYPE = "Healthy_Hepatocytes"  # starting point for latent arithmetic
 logging.info(f"Held-out test cell type (ground truth): '{TEST_CELLTYPE}'")
 logging.info(f"Control cell type used as prediction starting point: '{CTRL_CELLTYPE}'")
 
@@ -164,7 +161,7 @@ VIDR.setup_anndata(
     train_adata,
     batch_key="Condition",  # "Normal" / "Disease" — used as ctrl_key/treat_key
     labels_key="cell_type",  # unified cell type column
-    condition_key=None,      # categorical comparison, no numeric condition needed
+    condition_key=None,  # categorical comparison, no numeric condition needed
 )
 
 model = VIDR(
@@ -175,6 +172,7 @@ model = VIDR(
     use_linear_decoder=False,
     use_nca_loss=True,
     use_condition_loss=False,
+    kl_weight=1e-4,
 )
 logging.info(f"\n{model}")
 
@@ -183,10 +181,10 @@ logging.info(f"\n{model}")
 # ---------------------------------------------------------------------------
 logging.info("Training...")
 model.train(
-    max_epochs=100,
+    max_epochs=20,
     batch_size=128,
     early_stopping=True,
-    early_stopping_patience=15,
+    early_stopping_patience=5,
 )
 
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -207,7 +205,7 @@ pred_adata, delta, reg = model.predict(
     ctrl_key=CTRL_CONDITION,
     treat_key=TREAT_CONDITION,
     cell_type_to_predict=CTRL_CELLTYPE,  # start from Healthy_Hepatocytes
-    regression=True,                      # scVIDR mode: regress delta across cell types
+    regression=True,  # scVIDR mode: regress delta across cell types
 )
 
 pred_adata.obs["Condition"] = f"predicted_{TREAT_CONDITION}"
@@ -228,7 +226,7 @@ logging.info(f"Saved predictions to: {out_path}")
 # 10. R² check — predicted Injured_Hepatocytes vs. real Injured_Hepatocytes
 # ---------------------------------------------------------------------------
 if test_adata.n_obs > 0:
-    from scipy import stats, sparse
+    from scipy import sparse, stats
 
     X_pred = pred_adata.X.A if sparse.issparse(pred_adata.X) else pred_adata.X
     X_real = test_adata.X.A if sparse.issparse(test_adata.X) else test_adata.X
@@ -270,36 +268,30 @@ hep_adata.obs_names_make_unique()
 deg_adata = anndata.concat([healthy_hep, test_adata], join="inner")
 deg_adata.obs_names_make_unique()
 sc.tl.rank_genes_groups(
-    deg_adata, groupby="Condition", groups=["Disease"], reference="Normal", method="t-test"
+    deg_adata,
+    groupby="Condition",
+    groups=["Disease"],
+    reference="Normal",
+    method="t-test",
+    use_raw=False,  # force use of deg_adata.X (2000 HVGs), not .raw
 )
 top_degs = deg_adata.uns["rank_genes_groups"]["names"]["Disease"][:100].tolist()
-# Keep only genes present in hep_adata after the inner join with pred_adata
-top_degs = [g for g in top_degs if g in hep_adata.var_names]
-logging.info(f"Top DEGs retained after gene intersection: {len(top_degs)}")
+# Filter to genes present in both test_adata and pred_adata
+# (reg_mean_plot indexes by name into each adata independently)
+test_var = set(test_adata.var_names)
+pred_var = set(pred_adata.var_names)
+top_degs = [g for g in top_degs if g in test_var and g in pred_var]
+logging.info(f"Top DEGs available in both test and pred adata: {len(top_degs)}")
 logging.info(f"Top 5 DEGs (Disease vs Normal hepatocytes): {top_degs[:5]}")
 
-# --- Plot 1: reg_mean_plot — Normal vs Predicted ---
-# Shows the magnitude and direction of the learned disease shift.
-logging.info("Saving: reg_mean_normal_vs_predicted.pdf")
-model.reg_mean_plot(
-    hep_adata,
-    axis_keys={"x": "Normal", "y": "predicted_Disease"},
-    labels={"x": "Healthy Hepatocytes (Normal)", "y": "Predicted Injured Hepatocytes"},
-    title="Normal vs Predicted Disease Hepatocytes",
-    top_100_genes=top_degs,
-    path_to_save=os.path.join(FIGURES_DIR, "reg_mean_normal_vs_predicted.pdf"),
-    save=True,
-    show=False,
-    verbose=True,
-)
-
-# --- Plot 2: reg_mean_plot — Real Disease vs Predicted ---
-# Shows prediction accuracy against held-out ground truth.
+# --- Plot 1: reg_mean_plot — Real Disease vs Predicted ---
+# Compares mean expression of predicted Injured_Hepatocytes against the held-out
+# real Injured_Hepatocytes. top_degs highlights prediction accuracy on the most
+# disease-relevant genes.
 logging.info("Saving: reg_mean_real_vs_predicted.pdf")
 model.reg_mean_plot(
-    hep_adata,
-    axis_keys={"x": "Disease", "y": "predicted_Disease"},
-    labels={"x": "Real Injured Hepatocytes", "y": "Predicted Injured Hepatocytes"},
+    true_adata=test_adata,
+    pred_adata=pred_adata,
     title="Real vs Predicted Injured Hepatocytes",
     top_100_genes=top_degs,
     path_to_save=os.path.join(FIGURES_DIR, "reg_mean_real_vs_predicted.pdf"),
@@ -317,13 +309,17 @@ sc.tl.umap(hep_adata)
 
 sc.pl.umap(hep_adata, color="Condition", title="Hepatocytes by Condition", show=False)
 plt.savefig(
-    os.path.join(FIGURES_DIR, "umap_hepatocytes_condition.pdf"), bbox_inches="tight", dpi=100
+    os.path.join(FIGURES_DIR, "umap_hepatocytes_condition.pdf"),
+    bbox_inches="tight",
+    dpi=100,
 )
 plt.close()
 
 sc.pl.umap(hep_adata, color="cell_type", title="Hepatocytes by Cell Type", show=False)
 plt.savefig(
-    os.path.join(FIGURES_DIR, "umap_hepatocytes_celltype.pdf"), bbox_inches="tight", dpi=100
+    os.path.join(FIGURES_DIR, "umap_hepatocytes_celltype.pdf"),
+    bbox_inches="tight",
+    dpi=100,
 )
 plt.close()
 
@@ -341,27 +337,35 @@ import torch
 model.module.eval()
 X_test = test_adata.X.toarray() if sparse.issparse(test_adata.X) else test_adata.X
 with torch.no_grad():
-    z_test = model.module.inference(
-        torch.FloatTensor(X_test).to(model.device)
-    )["z"].cpu().numpy()
+    z_test = (
+        model.module.inference(torch.FloatTensor(X_test).to(model.device))["z"]
+        .cpu()
+        .numpy()
+    )
 
 latent_all = np.concatenate([latent_train, z_test], axis=0)
-obs_all = anndata.concat(
-    [train_adata, test_adata], join="inner"
-).obs[["Condition", "cell_type"]].copy()
+obs_all = (
+    anndata.concat([train_adata, test_adata], join="inner")
+    .obs[["Condition", "cell_type"]]
+    .copy()
+)
 obs_all.index = [str(i) for i in range(len(obs_all))]
 
 latent_adata = sc.AnnData(X=latent_all, obs=obs_all)
 sc.pp.neighbors(latent_adata, use_rep="X")
 sc.tl.umap(latent_adata)
 
-sc.pl.umap(latent_adata, color="Condition", title="Latent Space by Condition", show=False)
+sc.pl.umap(
+    latent_adata, color="Condition", title="Latent Space by Condition", show=False
+)
 plt.savefig(
     os.path.join(FIGURES_DIR, "umap_latent_condition.pdf"), bbox_inches="tight", dpi=100
 )
 plt.close()
 
-sc.pl.umap(latent_adata, color="cell_type", title="Latent Space by Cell Type", show=False)
+sc.pl.umap(
+    latent_adata, color="cell_type", title="Latent Space by Cell Type", show=False
+)
 plt.savefig(
     os.path.join(FIGURES_DIR, "umap_latent_celltype.pdf"), bbox_inches="tight", dpi=100
 )

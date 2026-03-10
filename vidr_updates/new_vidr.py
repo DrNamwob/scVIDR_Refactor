@@ -7,6 +7,7 @@ import pandas as pd
 import scanpy as sc
 import torch
 from adjustText import adjust_text
+import anndata
 from anndata import AnnData
 from matplotlib import pyplot
 from scipy import sparse, stats
@@ -88,7 +89,7 @@ class VIDR(BaseModelClass):
         n_latent: int = 100,
         n_layers: int = 2,
         dropout_rate: float = 0.2,
-        kl_weight: float = 5e-5,
+        kl_weight: float = 1e-4,
         use_linear_decoder: bool = False,
         use_nca_loss: bool = False,
         use_condition_loss: bool = False,
@@ -345,8 +346,9 @@ class VIDR(BaseModelClass):
         ctrl_x = random_sample(ctrl_x, cell_type_key)
         treat_x = random_sample(treat_x, cell_type_key)
 
-        # Balance across treatment groups
-        new_adata = ctrl_x.concatenate(treat_x)
+        # Balance across treatment groups (use modern API to preserve var_names cleanly)
+        new_adata = anndata.concat([ctrl_x, treat_x], join="inner")
+        new_adata.obs_names_make_unique()
         new_adata = random_sample(
             new_adata, treatment_key, max_or_min="min", replacement=False
         )
@@ -480,117 +482,118 @@ class VIDR(BaseModelClass):
 
     def reg_mean_plot(
         self,
-        adata: AnnData,
-        axis_keys: dict,
-        labels: dict,
+        true_adata: AnnData,
+        pred_adata: AnnData,
         path_to_save: str = "./reg_mean.pdf",
         save: bool = True,
         gene_list: Optional[List[str]] = None,
         show: bool = False,
         top_100_genes=None,
         verbose: bool = False,
-        legend: bool = True,
         title: Optional[str] = None,
-        x_coeff: float = 0.30,
-        y_coeff: float = 0.8,
         fontsize: int = 14,
         **kwargs,
     ):
         """
-        Plot mean expression of predicted vs. ground-truth treated cells.
+        Scatter plot of mean expression: true diseased cells vs. predicted diseased cells.
 
         Parameters
         ----------
-        adata
-            AnnData containing control, predicted, and (optionally) treated cells.
-        axis_keys
-            Dict mapping axis roles to obs condition values.
-            e.g. {"x": "control", "y": "pred", "y1": "treated"}
-        labels
-            Dict of axis label strings. e.g. {"x": "Control", "y": "Predicted"}
+        true_adata
+            AnnData of real (held-out) diseased cells.
+        pred_adata
+            AnnData of model-predicted diseased cells.
         path_to_save
             File path to save the figure.
         save
             Whether to save the figure.
         gene_list
-            List of gene names to annotate on the plot.
+            Gene names to annotate on the plot (red dots with labels).
         show
             Whether to display the plot interactively.
         top_100_genes
-            Optional list of top DEGs to compute a secondary R² for.
+            Optional list of top DEGs for a secondary R² annotation.
         verbose
             If True, print R² values.
-        legend
-            Whether to show the legend.
         title
             Plot title.
-        x_coeff, y_coeff
-            Position coefficients for the R² text annotation.
         fontsize
             Font size for axis labels and annotations.
 
         Returns
         -------
         float or tuple of floats
-            R² for all genes, and optionally R² for top DEGs.
+            R² for all genes, and (if top_100_genes given) R² for the DEG subset.
         """
         import seaborn as sns
 
-        sns.set()
         sns.set(color_codes=True)
 
-        if sparse.issparse(adata.X):
-            adata.X = adata.X.A
+        # Densify locally — never mutate the caller's data
+        true_X = true_adata.X.A if sparse.issparse(true_adata.X) else true_adata.X
+        pred_X = pred_adata.X.A if sparse.issparse(pred_adata.X) else pred_adata.X
 
-        # Get the treatment obs key from registry
-        condition_key = self.adata_manager.get_state_registry(REGISTRY_KEYS.BATCH_KEY)[
-            "original_key"
-        ]
+        x = numpy.average(true_X, axis=0)   # mean over cells → (n_genes,)
+        y = numpy.average(pred_X, axis=0)
 
-        diff_genes = top_100_genes
-        treat = adata[adata.obs[condition_key] == axis_keys["y"]]
-        ctrl = adata[adata.obs[condition_key] == axis_keys["x"]]
-
-        if diff_genes is not None:
-            if hasattr(diff_genes, "tolist"):
-                diff_genes = diff_genes.tolist()
-            adata_diff = adata[:, diff_genes]
-            treat_diff = adata_diff[adata_diff.obs[condition_key] == axis_keys["y"]]
-            ctrl_diff = adata_diff[adata_diff.obs[condition_key] == axis_keys["x"]]
-            x_diff = numpy.average(ctrl_diff.X, axis=0)
-            y_diff = numpy.average(treat_diff.X, axis=0)
-            m, b, r_value_diff, p_value_diff, std_err_diff = stats.linregress(
-                x_diff, y_diff
-            )
-            if verbose:
-                print("top_100 DEGs mean: ", r_value_diff**2)
-
-        x = numpy.average(ctrl.X, axis=0)
-        y = numpy.average(treat.X, axis=0)
-        m, b, r_value, p_value, std_err = stats.linregress(x, y)
+        _, _, r_value, _, _ = stats.linregress(x, y)
+        r2_all = r_value ** 2
         if verbose:
-            print("All genes mean: ", r_value**2)
+            print(f"R² all genes: {r2_all:.4f}")
 
-        df = pd.DataFrame({axis_keys["x"]: x, axis_keys["y"]: y})
-        ax = sns.regplot(x=axis_keys["x"], y=axis_keys["y"], data=df)
+        # Optional DEG subset R²
+        r2_deg = None
+        if top_100_genes is not None:
+            deg_list = (
+                top_100_genes.tolist()
+                if hasattr(top_100_genes, "tolist")
+                else top_100_genes
+            )
+            true_var = true_adata.var_names.tolist()
+            pred_var = pred_adata.var_names.tolist()
+            true_deg = true_X[:, [true_var.index(g) for g in deg_list]]
+            pred_deg = pred_X[:, [pred_var.index(g) for g in deg_list]]
+            _, _, r_deg, _, _ = stats.linregress(
+                numpy.average(true_deg, axis=0),
+                numpy.average(pred_deg, axis=0),
+            )
+            r2_deg = r_deg ** 2
+            if verbose:
+                print(f"R² top DEGs: {r2_deg:.4f}")
+
+        # Plot
+        fig, ax = pyplot.subplots()
+        df = pd.DataFrame({"true_diseased": x, "predicted": y})
+        sns.regplot(x="true_diseased", y="predicted", data=df, ax=ax)
         ax.tick_params(labelsize=fontsize)
+        ax.set_xlabel("True Diseased (mean expression)", fontsize=fontsize)
+        ax.set_ylabel("Predicted Diseased (mean expression)", fontsize=fontsize)
+        pyplot.title(title or "", fontsize=fontsize)
 
         if "range" in kwargs:
-            start, stop, step = kwargs.get("range")
+            start, stop, step = kwargs["range"]
             ax.set_xticks(numpy.arange(start, stop, step))
             ax.set_yticks(numpy.arange(start, stop, step))
 
-        ax.set_xlabel(labels["x"], fontsize=fontsize)
-        ax.set_ylabel(labels["y"], fontsize=fontsize)
+        # R² annotations using axis-relative coords (robust to any data range)
+        ax.text(
+            0.05, 0.95, f"R² all genes = {r2_all:.2f}",
+            transform=ax.transAxes, fontsize=fontsize, va="top",
+        )
+        if r2_deg is not None:
+            ax.text(
+                0.05, 0.88, f"R² top DEGs = {r2_deg:.2f}",
+                transform=ax.transAxes, fontsize=fontsize, va="top",
+            )
 
+        # Annotate specific genes
         if gene_list is not None:
+            var_names = true_adata.var_names.tolist()
             texts = []
-            for i in gene_list:
-                j = adata.var_names.tolist().index(i)
-                x_bar = x[j]
-                y_bar = y[j]
-                texts.append(pyplot.text(x_bar, y_bar, i, fontsize=11, color="black"))
-                pyplot.plot(x_bar, y_bar, "o", color="red", markersize=5)
+            for gene in gene_list:
+                j = var_names.index(gene)
+                texts.append(pyplot.text(x[j], y[j], gene, fontsize=11, color="black"))
+                pyplot.plot(x[j], y[j], "o", color="red", markersize=5)
             adjust_text(
                 texts,
                 x=x,
@@ -599,33 +602,10 @@ class VIDR(BaseModelClass):
                 force_points=(0.0, 0.0),
             )
 
-        if legend:
-            pyplot.legend(loc="center left", bbox_to_anchor=(1, 0.5))
-
-        pyplot.title(title if title is not None else "", fontsize=fontsize)
-
-        ax.text(
-            max(x) - max(x) * x_coeff,
-            max(y) - y_coeff * max(y),
-            r"$\mathrm{R^2_{\mathrm{\mathsf{all\ genes}}}}$= " + f"{r_value**2:.2f}",
-            fontsize=kwargs.get("textsize", fontsize),
-        )
-        if diff_genes is not None:
-            ax.text(
-                max(x) - max(x) * x_coeff,
-                max(y) - (y_coeff + 0.15) * max(y),
-                r"$\mathrm{R^2_{\mathrm{\mathsf{top\ 100\ DEGs}}}}$= "
-                + f"{r_value_diff**2:.2f}",
-                fontsize=kwargs.get("textsize", fontsize),
-            )
-
         if save:
             pyplot.savefig(path_to_save, bbox_inches="tight", dpi=100)
         if show:
             pyplot.show()
         pyplot.close()
 
-        if diff_genes is not None:
-            return r_value**2, r_value_diff**2
-        else:
-            return r_value**2
+        return (r2_all, r2_deg) if r2_deg is not None else r2_all
